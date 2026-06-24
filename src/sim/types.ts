@@ -49,6 +49,7 @@ export interface Order {
     items: number[];        // menu item ids
     placedAt: number;
     readyAt?: number;
+    tasksRemaining: number;
 }
 
 export interface TaskInstance {
