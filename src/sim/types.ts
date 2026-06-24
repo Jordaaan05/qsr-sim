@@ -59,7 +59,8 @@ export interface TaskInstance {
     status: "pending" | "inProgress" | "done";
     stationId?: number;
     startedAt?: number;
-    finishAt?: number;
+    finishAt: number;
+    dependsOn: number[];
 }
 
 export interface Customer {

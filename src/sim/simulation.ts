@@ -37,6 +37,22 @@ export class Simulation {
                 c.state = 'left_angry';
             }
         }
+
+        for (const t of this.state.tasks) {
+            if (t.status !== 'inProgress') continue;
+            if (this.state.now < t.finishAt) continue; // timer not yet over
+
+            t.status = 'done';
+            const station = this.state.stations.find((station) => station.id === t.stationId);
+            if (station) {
+                const i = station.inProgress.findIndex(task => task.id === t.id);
+                if (i !== -1) station.inProgress.splice(i, 1);
+            }
+            const order = this.state.orders.find(o => o.id === t.orderId);
+            if (order && --order.tasksRemaining === 0) {
+                // order complete -> customer gets served (soon)
+            }
+        }
     }
 
     private staff() {
@@ -44,6 +60,18 @@ export class Simulation {
     }
 
     private dispatch() {
-        return
+        for (const t of this.state.tasks) {
+            if (t.status !== 'pending') continue;
+            const ready = t.dependsOn.every(depId => this.state.tasks.find(task => task.id === depId)?.status === 'done');
+            if (!ready) continue;
+
+            const station = this.state.stations.find(s => s.type === t.template.stationType);
+            if (!station) continue;
+
+            t.status = 'inProgress';
+            t.stationId = station.id;
+            t.finishAt = this.state.now + t.template.durationS;
+            station.inProgress.push(t);
+        }
     }
 }

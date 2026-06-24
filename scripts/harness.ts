@@ -3,13 +3,16 @@
 
 import { Simulation } from "../src/sim/simulation";
 import { WorldState } from "../src/sim/types";
+import {createOrder, spawnCustomer} from "../src/sim/world";
 
 // config
 
 const deltaTime = 1/8;
 const simulatedSeconds = 60*60; // simulate for an hour
+const dagTestSeconds = 300; // short run to test the DAG, allowing the order to fully drain
 const snapshotEvery = 60; // record a snapshot every 60 sim-seconds
 const checkInvariance = true;
+const logCompletions = true;
 const sim = new Simulation();
 
 // run loop
@@ -22,9 +25,14 @@ function runHeadless(simSeconds: number): RunResult {
     const totalTicks = Math.round(simSeconds / deltaTime);
     const snapshots: Snapshot[] = [];
     let nextSnapshotAt = 0;
+    const alreadyLogged = new Set<number>();
 
     for (let i = 0; i < totalTicks; i++) {
         sim.tick(deltaTime);
+
+        if (logCompletions) {
+            logNewCompletions(sim.state, alreadyLogged)
+        }
 
         if (checkInvariance) {
             const violation = checkInvariants(sim.state);
@@ -43,6 +51,32 @@ function runHeadless(simSeconds: number): RunResult {
 
     return { snapshots };
 }
+
+// test setup
+function injectTestOrder(): void {
+    spawnCustomer(sim.state);
+    const customer = sim.state.customers[sim.state.customers.length - 1];
+
+    const item = sim.state.menu[0];
+    if (!item) throw new Error("No menu item could be found");
+
+    createOrder(sim.state, customer, [item]);
+    console.log(`Injected 1 order - ${sim.state.tasks.length} tasks created, all should be 'pending'`);
+}
+
+// completion logging
+function logNewCompletions(w: WorldState, alreadyLogged: Set<number>): void {
+    for (const t of w.tasks) {
+        if (t.status === 'done' && !alreadyLogged.has(t.id)) {
+            alreadyLogged.add(t.id);
+            const order = w.orders.find((o) => o.id === t.orderId);
+            console.log(
+                `t=${w.now.toFixed(1)}s done: task ${t.id} [${t.template.stationType}] 
+    order=${t.orderId} remaining=${order?.tasksRemaining}`)
+        }
+    }
+}
+
 
 // invariant checks
 
@@ -85,6 +119,9 @@ interface Snapshot {
     queueLen: number;
     cash: number;
     balked: number;
+    pending: number;
+    active: number;
+    done: number;
 }
 
 function snapshot(w: WorldState): Snapshot {
@@ -95,6 +132,9 @@ function snapshot(w: WorldState): Snapshot {
         queueLen: w.customers.filter((c) => c.state === 'queueing').length,
         cash: Math.round(w.economy.cash),
         balked: w.customers.filter((c) => c.state === "balked").length,
+        pending: w.tasks.filter((t) => t.status === 'pending').length,
+        active: w.tasks.filter((t) => t.status === 'inProgress').length,
+        done: w.tasks.filter((t) => t.status === 'done').length,
     };
 }
 
@@ -121,8 +161,9 @@ function printSnapshots(label: string, snapshots: Snapshot[]) {
 // entry point
 
 function main(): void {
-    const { snapshots } = runHeadless(simulatedSeconds);
-    printSnapshots("baseline, 1 hour", snapshots);
+    injectTestOrder();
+    const { snapshots } = runHeadless(dagTestSeconds);
+    printSnapshots("dag test", snapshots);
 
     // compare(fifo, spt, simulatedSeconds) once policies implemented.
 }

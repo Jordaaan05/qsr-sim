@@ -1,4 +1,4 @@
-import type {WorldState, MenuItem, Station, Worker} from "./types.ts";
+import type {WorldState, MenuItem, Station, Worker, Customer, TaskInstance } from "./types.ts";
 
 let _id = 0;
 export const nextId = () => ++_id;
@@ -65,4 +65,42 @@ export function spawnCustomer(world: WorldState): void {
         patienceS: 120,
         state: "queueing",
     });
+}
+
+export function createOrder(world: WorldState, customer: Customer, items: MenuItem[]): void {
+    const orderId = nextId()
+    const allTasks: TaskInstance[] = [];
+
+    for (const item of items) {
+        const steps = item.tasks;
+        const localMap = new Map<number, number>(); // recipe-local index -> new instance index
+
+        const instances = steps.map((template, i) => {
+            const inst: TaskInstance = {
+                id: nextId(),
+                orderId,
+                template,
+                status: "pending",
+                finishAt: 0, // placeholder until dispatch stamps (orders not inProgress cannot be marked as done)
+                dependsOn: [],
+            };
+            localMap.set(i, inst.id);
+            return inst;
+        });
+
+        instances.forEach((inst, i) => {
+            inst.dependsOn = steps[i].dependsOn.map(key => localMap.get(key)!);
+        });
+
+        allTasks.push(...instances);
+    }
+
+    world.tasks.push(...allTasks);
+    world.orders.push({
+        id: orderId,
+        customerId: customer.id,
+        items: items.map((i) => i.id),
+        placedAt: world.now,
+        tasksRemaining: allTasks.length,
+    })
 }
