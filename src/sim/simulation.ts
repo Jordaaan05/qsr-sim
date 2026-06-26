@@ -1,23 +1,22 @@
 import {createWorld, spawnCustomer} from './world';
-import type { WorldState } from "./types.ts";
+import type {Candidate, Policy, Station, StationType, TaskInstance, WorldState} from "./types.ts";
+import {fifo} from "./dispatch.ts";
 
 export class Simulation {
     state: WorldState;
     metrics = { servedPerMin: 0, arrivalsPerMin: 0 };
     private nextArrivalIn: number = 0;
+    private policy: Policy = fifo;
 
     constructor() {
         this.state = createWorld();
     }
 
     tick(delta: number) { // time delta in seconds
-        // advance cook timers, customer patience, staff movements
-        // call dispatcher when resources available
-
         this.state.now += delta;
 
         this.spawnArrivals(delta);
-        this.advance(delta);
+        this.advance(); // add delta back if need be here
         this.staff();
         this.dispatch();
     }
@@ -31,7 +30,17 @@ export class Simulation {
         }
     }
 
-    private advance(delta: number) {
+    private toCandidate(t: TaskInstance): Candidate {
+        const order = this.state.orders.find((o) => o.id === t.orderId);
+        return {
+            task: t,
+            arrivalKey: order?.placedAt ?? Infinity,
+            duration: t.template.durationS,
+            parentRemaining: order?.tasksRemaining ?? Infinity,
+        }
+    }
+
+    private advance() {
         for (const c of this.state.customers) {
             if (c.state === 'queueing' && this.state.now - c.arrivedAt > c.patienceS) {
                 c.state = 'left_angry';
@@ -60,18 +69,41 @@ export class Simulation {
     }
 
     private dispatch() {
+        const readyByType = new Map<StationType, Candidate[]>();
+
         for (const t of this.state.tasks) {
-            if (t.status !== 'pending') continue;
-            const ready = t.dependsOn.every(depId => this.state.tasks.find(task => task.id === depId)?.status === 'done');
+            if (t.status !== "pending") continue;
+            const ready = t.dependsOn.every(
+                depId => this.state.tasks.find(x => x.id === depId)?.status === "done"
+            );
             if (!ready) continue;
 
-            const station = this.state.stations.find(s => s.type === t.template.stationType);
-            if (!station) continue;
-
-            t.status = 'inProgress';
-            t.stationId = station.id;
-            t.finishAt = this.state.now + t.template.durationS;
-            station.inProgress.push(t);
+            const type = t.template.stationType;
+            let bucket = readyByType.get(type);
+            if (!bucket) readyByType.set(type, (bucket = []));
+            bucket.push(this.toCandidate(t));
         }
+
+        for (const [type, candidates] of readyByType) {
+            const stations = this.state.stations.filter(s => s.type === type);
+            const freeSlots = stations.reduce((n, s) => n + (s.slots - s.inProgress.length), 0);
+            if (freeSlots <= 0) continue;
+
+            const selected = this.policy(candidates, freeSlots);
+
+            for (const task of selected) {
+                const station = stations.find(s => s.inProgress.length < s.slots);
+                if (!station) break;
+                this.assign(task, station);
+            }
+        }
+    }
+
+    private assign(t: TaskInstance, station: Station) {
+        t.status = 'inProgress';
+        t.stationId = station.id;
+        t.startedAt = this.state.now;
+        t.finishAt = this.state.now + t.template.durationS;
+        station.inProgress.push(t);
     }
 }

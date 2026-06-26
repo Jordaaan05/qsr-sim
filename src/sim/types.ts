@@ -31,7 +31,6 @@ export interface Station {
     type: StationType;
     x: number; y: number;
     slots: number;              // how many tasks can occur at once
-    queue: TaskInstance[];      // tasks waiting
     inProgress: TaskInstance[]; // tasks in progress
 }
 
@@ -75,3 +74,12 @@ export interface Economy {
     cash: number;
     rentPerDay: number;
 }
+
+export interface Candidate {
+    task: TaskInstance,
+    arrivalKey: number,
+    duration: number,
+    parentRemaining: number;
+}
+
+export type Policy = (candidates: Candidate[], capacity: number) => TaskInstance[];

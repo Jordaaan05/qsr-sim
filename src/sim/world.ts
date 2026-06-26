@@ -22,7 +22,7 @@ const menu: MenuItem[] = [
 
 function createStations(): Station[] {
     const make = (type: Station['type'], x: number, y: number, slots: number): Station => ({
-        id: nextId(), type, x, y, slots, queue: [], inProgress: [],
+        id: nextId(), type, x, y, slots, inProgress: [],
     });
     return [
         make('register', 100, 400, 1),
