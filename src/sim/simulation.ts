@@ -1,4 +1,4 @@
-import {createWorld, spawnCustomer} from './world';
+import {createOrder, createWorld, spawnCustomer} from './world';
 import type {Candidate, Policy, Station, StationType, TaskInstance, WorldState} from "./types.ts";
 import {fifo} from "./dispatch.ts";
 
@@ -6,10 +6,12 @@ export class Simulation {
     state: WorldState;
     metrics = { servedPerMin: 0, arrivalsPerMin: 0 };
     private nextArrivalIn: number = 0;
-    private policy: Policy = fifo;
+    private policy: Policy;
 
-    constructor() {
-        this.state = createWorld();
+    constructor(opts: { seed?: number, policy?: Policy } = {}) {
+        const { seed, policy = fifo } = opts;
+        this.state = createWorld({ seed });
+        this.policy = policy;
     }
 
     tick(delta: number) { // time delta in seconds
@@ -25,8 +27,11 @@ export class Simulation {
         this.nextArrivalIn -= delta;
         if (this.nextArrivalIn <= 0) {
             spawnCustomer(this.state);
+            // TEMP: spawn custoemrs
+            const customer = this.state.customers[this.state.customers.length - 1];
+            createOrder(this.state, customer ,[this.state.menu[Math.floor(this.state.rng() * this.state.menu.length)]])
             const perSec = this.state.arrivalRate / 60;
-            this.nextArrivalIn = -Math.log(1 - Math.random()) / perSec;
+            this.nextArrivalIn = -Math.log(1 - this.state.rng()) / perSec;
         }
     }
 
@@ -59,7 +64,11 @@ export class Simulation {
             }
             const order = this.state.orders.find(o => o.id === t.orderId);
             if (order && --order.tasksRemaining === 0) {
-                // order complete -> customer gets served (soon)
+                order.readyAt = this.state.now;
+                const customer = this.state.customers.find(c => c.id === order.customerId);
+                if (customer && customer.state === 'queueing') {
+                    customer.state = 'satisfied';
+                }
             }
         }
     }

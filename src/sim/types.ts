@@ -8,6 +8,7 @@ export interface WorldState {
     orders: Order[];
     tasks: TaskInstance[];
     arrivalRate: number;
+    rng: () => number;
 }
 
 export interface MenuItem {

@@ -18,7 +18,40 @@ const menu: MenuItem[] = [
             { stationType: 'bagging', durationS: 10, dependsOn: [2,3,4] },  // 5 assembly order, requires burger drink and fries.
         ],
     },
+    {
+        id: nextId(),
+        name: 'Big Boss Burger',
+        price: 11.5,
+        ingredientCost: 6,
+        tasks: [
+            { stationType: 'register', durationS: 10, dependsOn: []},
+            { stationType: 'grill', durationS: 90, dependsOn: [0]},
+            { stationType: 'assembly', durationS: 30, dependsOn: [1]},
+            { stationType: 'bagging', durationS: 10, dependsOn: [2]},
+        ],
+    },
+    {
+        id: nextId(),
+        name: 'Fountain Drink',
+        price: 3,
+        ingredientCost: 0.25,
+        tasks: [
+            { stationType: 'register', durationS: 10, dependsOn: []},
+            { stationType: 'drinks', durationS: 15, dependsOn: [0]},
+            { stationType: 'bagging', durationS: 10, dependsOn: [1]},
+        ],
+    },
 ];
+
+// Based on the mulberry32 algorithm
+const rng = (randomSeed: number) => {
+    return function() {
+        randomSeed |= 0; randomSeed = randomSeed + 0x6D2B79F5 | 0;
+        let t = Math.imul(randomSeed ^ randomSeed >>> 15, 1 | randomSeed);
+        t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+        return ((t ^ t >>> 14) >>> 0) / 4294967296;
+    }
+}
 
 function createStations(): Station[] {
     const make = (type: Station['type'], x: number, y: number, slots: number): Station => ({
@@ -44,7 +77,8 @@ function createWorkers(): Worker[] {
     ];
 }
 
-export function createWorld(): WorldState {
+export function createWorld(opts: { seed?: number } = {}): WorldState {
+    const { seed = 32 } = opts;
     return {
         now: 0,
         economy: { cash: 500, rentPerDay: 200 },
@@ -55,6 +89,7 @@ export function createWorld(): WorldState {
         orders: [],
         tasks: [],
         arrivalRate: 6,
+        rng: rng(seed),
     };
 }
 

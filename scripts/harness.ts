@@ -2,8 +2,9 @@
 // run with npx tsx scripts/harness.ts
 
 import { Simulation } from "../src/sim/simulation";
-import { WorldState } from "../src/sim/types";
+import {WorldState} from "../src/sim/types";
 import {createOrder, spawnCustomer} from "../src/sim/world";
+import {fifo, oca, spt} from "../src/sim/dispatch";
 
 // config
 
@@ -13,7 +14,6 @@ const dagTestSeconds = 300; // short run to test the DAG, allowing the order to 
 const snapshotEvery = 60; // record a snapshot every 60 sim-seconds
 const checkInvariance = true;
 const logCompletions = true;
-const sim = new Simulation();
 
 // run loop
 
@@ -21,7 +21,16 @@ interface RunResult {
     snapshots: Snapshot[];
 }
 
-function runHeadless(simSeconds: number): RunResult {
+interface Summary {
+    completed: number;
+    meanCycleS: number;
+    maxCycleS: number;
+    served: number;
+    enraged: number;
+    balked: number;
+}
+
+function runHeadless(sim: Simulation, simSeconds: number): RunResult {
     const totalTicks = Math.round(simSeconds / deltaTime);
     const snapshots: Snapshot[] = [];
     let nextSnapshotAt = 0;
@@ -53,7 +62,7 @@ function runHeadless(simSeconds: number): RunResult {
 }
 
 // test setup
-function injectTestOrder(): void {
+function injectTestOrder(sim: Simulation): void {
     spawnCustomer(sim.state);
     const customer = sim.state.customers[sim.state.customers.length - 1];
 
@@ -143,29 +152,41 @@ function printSnapshots(label: string, snapshots: Snapshot[]) {
     console.table(snapshots);
 }
 
-// ---- policy comparison -----------------------------------------------------
-// The eventual payoff: run the SAME scenario under two policies and diff.
-//
-// IMPORTANT: this is only meaningful if both runs see the IDENTICAL arrival
-// stream. Without seeded RNG (§10) each createWorld() draws different arrivals
-// and you are comparing noise, not policies. This function is the single
-// clearest reason to keep seeding on the table — pass the same seed to both.
+function summarise(w: WorldState): Summary {
+    const completed = w.orders.filter(o => o.readyAt !== undefined);
+    const cycles = completed.map(o => o.readyAt! - o.placedAt);
 
-// function compare(policyA: Policy, policyB: Policy, simSeconds: number): void {
-//   const a = runHeadless(createWorld({ policy: policyA, seed: 42 }), simSeconds);
-//   const b = runHeadless(createWorld({ policy: policyB, seed: 42 }), simSeconds);
-//   console.log("\n=== policy comparison (final snapshot) ===");
-//   console.table({ A: a.snapshots.at(-1)!, B: b.snapshots.at(-1)! });
-// }
+    const mean = cycles.length
+        ? cycles.reduce((a, c) => a + c, 0) / cycles.length
+        : 0;
+    const max = cycles.length ? Math.max(...cycles) : 0;
+    const round1 = (n: number) => Math.round(n * 10) / 10;
+
+    return {
+        completed: completed.length,
+        meanCycleS: round1(mean),
+        maxCycleS: round1(max),
+        served:  w.customers.filter(c => c.state === 'satisfied').length,
+        enraged: w.customers.filter(c => c.state === 'left_angry').length,
+        balked:  w.customers.filter(c => c.state === 'balked').length,
+    };
+}
 
 // entry point
-
 function main(): void {
-    injectTestOrder();
-    const { snapshots } = runHeadless(dagTestSeconds);
+
+    const oneOrderTestSim = new Simulation();
+    injectTestOrder(oneOrderTestSim);
+    const { snapshots } = runHeadless(oneOrderTestSim, dagTestSeconds);
     printSnapshots("dag test", snapshots);
 
-    // compare(fifo, spt, simulatedSeconds) once policies implemented.
+    const rows: Record<string, Summary> = {};
+    for (const [name, policy] of [["fifo", fifo], ["spt", spt], ["oca", oca]] as const) {
+        const sim = new Simulation({ seed: 42, policy });
+        runHeadless(sim, simulatedSeconds);
+        rows[name] = summarise(sim.state);
+    }
+    console.table(rows);
 }
 
 main();
