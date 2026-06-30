@@ -1,7 +1,7 @@
 // Headless simulation harness for easier testing
 // run with npx tsx scripts/harness.ts
 
-import { Simulation } from "../src/sim/simulation";
+import { Simulation, isPassive } from "../src/sim/simulation";
 import {WorldState} from "../src/sim/types";
 import {createOrder, spawnCustomer} from "../src/sim/world";
 import {fifo, oca, spt} from "../src/sim/dispatch";
@@ -17,8 +17,15 @@ const logCompletions = true;
 
 // run loop
 
+interface UnloadProbe {
+    enteredAt: Map<number, number>;
+    dwells: number[];
+    everStalled: Set<number>;
+}
+
 interface RunResult {
     snapshots: Snapshot[];
+    unloadProbe: UnloadProbe;
 }
 
 interface Summary {
@@ -33,11 +40,13 @@ interface Summary {
 function runHeadless(sim: Simulation, simSeconds: number): RunResult {
     const totalTicks = Math.round(simSeconds / deltaTime);
     const snapshots: Snapshot[] = [];
+    const unloadProbe = createUnloadProbe();
     let nextSnapshotAt = 0;
     const alreadyLogged = new Set<number>();
 
     for (let i = 0; i < totalTicks; i++) {
         sim.tick(deltaTime);
+        observeUnloads(sim.state, unloadProbe);
 
         if (logCompletions) {
             logNewCompletions(sim.state, alreadyLogged)
@@ -58,7 +67,7 @@ function runHeadless(sim: Simulation, simSeconds: number): RunResult {
         }
     }
 
-    return { snapshots };
+    return { snapshots, unloadProbe };
 }
 
 // test setup
@@ -80,26 +89,48 @@ function logNewCompletions(w: WorldState, alreadyLogged: Set<number>): void {
             alreadyLogged.add(t.id);
             const order = w.orders.find((o) => o.id === t.orderId);
             console.log(
-                `t=${w.now.toFixed(1)}s done: task ${t.id} [${t.template.stationType}] 
+                `t=${w.now.toFixed(1)}s done: task ${t.id} [${t.template.stationType}]
     order=${t.orderId} remaining=${order?.tasksRemaining}`)
         }
     }
 }
 
+function createUnloadProbe(): UnloadProbe {
+    return { enteredAt: new Map(), dwells: [], everStalled: new Set() };
+}
 
 // invariant checks
-
 function checkInvariants(w: WorldState): string | null {
     // 1. An in progress task must have an assigned station
     for (const t of w.tasks) {
-        if (t.status === "inProgress" && t.stationId == null) {
-            return `task ${t.id} is inProgress but has no stationId`;
+        if (t.status !== "inProgress") continue;
+        if (t.stationId == null) return `task ${t.id} is inProgress but has no stationId`;
+
+        const held = w.workers.filter(wk => wk.assignedTaskId === t.id).length;
+        const passive = isPassive(t.template.stationType);
+        const shouldHold = !passive || t.phase === 'loading' || t.phase === 'unloading';
+
+        if (shouldHold && held !== 1) {
+            return `task ${t.id} (${t.template.stationType}/${t.phase ?? "active"}) should hold 1 worker, holds ${held}`;
+        } else if (!shouldHold && held !== 0) {
+            return `task ${t.id} (${t.template.stationType}/${t.phase}) is mid-cook, should hold 0 workers, holds ${held}`;
         }
-        // Assert worker assignments when exists
-        // if (t.status === "inProgress" && t.workerId == null)
     }
 
     // 2. No worker is assigned to two tasks at once
+    const claimed = new Set<number>();
+    for (const wk of w.workers) {
+        if (wk.assignedTaskId == null) continue;
+
+        if (claimed.has(wk.assignedTaskId)) {
+            return `task ${wk.assignedTaskId} is claimed by more than one worker`;
+        }
+        claimed.add(wk.assignedTaskId);
+
+        const task = w.tasks.find(t => t.id === wk.assignedTaskId);
+        if (!task) return `worker ${wk.id} holds nonexistent task ${wk.assignedTaskId}`;
+        if (task.status !== 'inProgress') return `worker ${wk.id} still holds task ${wk.assignedTaskId} (status: ${task.status}) - leaked`;
+    }
 
     // 3. A station can't have more tasks in progress than it has slots.
     for (const s of w.stations) {
@@ -120,7 +151,6 @@ function checkInvariants(w: WorldState): string | null {
 }
 
 // snapshots of stats
-
 interface Snapshot {
     t: number;
     served: number;
@@ -172,6 +202,37 @@ function summarise(w: WorldState): Summary {
     };
 }
 
+function observeUnloads(w: WorldState, probe: UnloadProbe): void {
+    const parkedNow = new Set<number>();
+    for (const t of w.tasks) {
+        if (t.status === 'inProgress' && t.phase === 'awaitingUnload') {
+            parkedNow.add(t.id);
+            if (!probe.enteredAt.has(t.id)) {
+                probe.enteredAt.set(t.id, w.now);
+                probe.everStalled.add(t.id);
+            }
+        }
+    }
+    // record dwells
+    for (const [taskId, since] of probe.enteredAt) {
+        if (!parkedNow.has(taskId)) {
+            probe.dwells.push(w.now - since);
+            probe.enteredAt.delete(taskId);
+        }
+    }
+}
+
+function summariseUnloads(label: string, probe: UnloadProbe): void {
+   const d = probe.dwells;
+   const mean = d.length ? d.reduce((a, c) => a + c, 0) / d.length : 0;
+   const max = d.length ? Math.max(...d) : 0;
+   console.log(
+       `[${label}] unload stalls: ${probe.everStalled.size} parked >= 1 tick |` +
+       `dwell mean=${mean.toFixed(2)}s max=${max.toFixed(2)}s |` +
+       `still parked at end=${probe.enteredAt.size}`
+   );
+}
+
 // entry point
 function main(): void {
 
@@ -183,8 +244,9 @@ function main(): void {
     const rows: Record<string, Summary> = {};
     for (const [name, policy] of [["fifo", fifo], ["spt", spt], ["oca", oca]] as const) {
         const sim = new Simulation({ seed: 42, policy });
-        runHeadless(sim, simulatedSeconds);
+        const { unloadProbe } = runHeadless(sim, simulatedSeconds);
         rows[name] = summarise(sim.state);
+        summariseUnloads(name, unloadProbe)
     }
     console.table(rows);
 }
