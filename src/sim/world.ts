@@ -67,24 +67,33 @@ function createStations(): Station[] {
     ];
 }
 
-function createWorkers(): Worker[] {
-    const make = (x: number, y: number): Worker => ({
-        id: nextId(), homeStation: undefined, x, y, wage: 18,
-    });
-    return [
-        make(200, 400),
-        make(500, 300),
-    ];
+function createWorkers(stations: Station[]): Worker[] {
+    // const make = (x: number, y: number): Worker => ({
+    //     id: nextId(), homeStation: undefined, x, y, wage: 18,
+    // });
+    // return [
+    //     make(200, 400),
+    //     make(500, 300),
+    // ];
+
+    return stations.map(station => ({
+        id: nextId(),
+        homeStation: station.id,
+        x: station.x,
+        y: station.y,
+        wage: 18,
+    }));
 }
 
 export function createWorld(opts: { seed?: number } = {}): WorldState {
     const { seed = 32 } = opts;
+    const stations = createStations();
     return {
         now: 0,
         economy: { cash: 500, rentPerDay: 200 },
         menu: menu,
-        stations: createStations(),
-        workers: createWorkers(),
+        stations: stations,
+        workers: createWorkers(stations),
         customers: [],
         orders: [],
         tasks: [],

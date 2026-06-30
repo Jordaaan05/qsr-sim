@@ -1,6 +1,9 @@
 import {createOrder, createWorld, spawnCustomer} from './world';
-import type {Candidate, Policy, Station, StationType, TaskInstance, WorldState} from "./types.ts";
+import type {Candidate, Policy, Station, StationType, TaskInstance, WorldState, Worker} from "./types.ts";
 import {fifo} from "./dispatch.ts";
+
+export const passiveStations = new Set<StationType>(['grill', 'fryer']);
+export const isPassive = (t: StationType) => passiveStations.has(t);
 
 export class Simulation {
     state: WorldState;
@@ -45,6 +48,12 @@ export class Simulation {
         }
     }
 
+    private freeWorkerAt(station: Station): Worker | undefined {
+        return this.state.workers.find(
+            w => w.homeStation === station.id && w.assignedTaskId == null
+        );
+    }
+
     private advance() {
         for (const c of this.state.customers) {
             if (c.state === 'queueing' && this.state.now - c.arrivedAt > c.patienceS) {
@@ -57,6 +66,8 @@ export class Simulation {
             if (this.state.now < t.finishAt) continue; // timer not yet over
 
             t.status = 'done';
+            const worker = this.state.workers.find(w => w.assignedTaskId == t.id);
+            if (worker) worker.assignedTaskId = undefined;
             const station = this.state.stations.find((station) => station.id === t.stationId);
             if (station) {
                 const i = station.inProgress.findIndex(task => task.id === t.id);
@@ -96,23 +107,27 @@ export class Simulation {
         for (const [type, candidates] of readyByType) {
             const stations = this.state.stations.filter(s => s.type === type);
             const freeSlots = stations.reduce((n, s) => n + (s.slots - s.inProgress.length), 0);
-            if (freeSlots <= 0) continue;
+            const freeWorkers = this.state.workers.filter(w => w.assignedTaskId == null && stations.some(s => s.id === w.homeStation)).length;
+            const capacity = Math.min(freeSlots, freeWorkers);
+            if (capacity <= 0) continue;
 
             const selected = this.policy(candidates, freeSlots);
 
             for (const task of selected) {
-                const station = stations.find(s => s.inProgress.length < s.slots);
+                const station = stations.find(s => s.inProgress.length < s.slots && this.freeWorkerAt(s));
                 if (!station) break;
-                this.assign(task, station);
+                const worker = this.freeWorkerAt(station)!;
+                this.assign(task, station, worker);
             }
         }
     }
 
-    private assign(t: TaskInstance, station: Station) {
+    private assign(t: TaskInstance, station: Station, worker: Worker) {
         t.status = 'inProgress';
         t.stationId = station.id;
         t.startedAt = this.state.now;
         t.finishAt = this.state.now + t.template.durationS;
         station.inProgress.push(t);
+        worker.assignedTaskId = t.id;
     }
 }

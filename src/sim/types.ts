@@ -40,6 +40,7 @@ export interface Worker {
     homeStation?: number; // if assigned a station or rotating
     x: number; y: number;
     carrying?: TaskInstance; // moving an item between stations
+    assignedTaskId?: number; // free when undefined
     wage: number;
 }
 
@@ -52,6 +53,8 @@ export interface Order {
     tasksRemaining: number;
 }
 
+export type PassivePhase = "loading" | "processing" | "awaitingUnload" | "unloading";
+
 export interface TaskInstance {
     id: number;
     orderId: number;
@@ -59,6 +62,7 @@ export interface TaskInstance {
     status: "pending" | "inProgress" | "done";
     stationId?: number;
     startedAt?: number;
+    phase?: PassivePhase;
     finishAt: number;
     dependsOn: number[];
 }
