@@ -1,4 +1,4 @@
-import type {WorldState, MenuItem, Station, Worker, Customer, TaskInstance } from "./types.ts";
+import type {WorldState, MenuItem, Station, Worker, Customer, TaskInstance, StationType} from "./types.ts";
 
 let _id = 0;
 export const nextId = () => ++_id;
@@ -67,16 +67,10 @@ function createStations(): Station[] {
     ];
 }
 
-function createWorkers(stations: Station[]): Worker[] {
-    // const make = (x: number, y: number): Worker => ({
-    //     id: nextId(), homeStation: undefined, x, y, wage: 18,
-    // });
-    // return [
-    //     make(200, 400),
-    //     make(500, 300),
-    // ];
-
-    return stations.map(station => ({
+function createWorkers(stations: Station[], unstaffed: StationType[] = []): Worker[] {
+    return stations
+        .filter(station => !unstaffed.includes(station.type))
+        .map(station => ({
         id: nextId(),
         homeStation: station.id,
         x: station.x,
@@ -85,20 +79,21 @@ function createWorkers(stations: Station[]): Worker[] {
     }));
 }
 
-export function createWorld(opts: { seed?: number } = {}): WorldState {
-    const { seed = 32 } = opts;
+export function createWorld(opts: { seed?: number, unstaffedStationTypes?: StationType[] } = {}): WorldState {
+    const { seed = 32, unstaffedStationTypes = [] } = opts;
     const stations = createStations();
     return {
         now: 0,
         economy: { cash: 500, rentPerDay: 200 },
         menu: menu,
         stations: stations,
-        workers: createWorkers(stations),
+        workers: createWorkers(stations, unstaffedStationTypes),
         customers: [],
         orders: [],
         tasks: [],
         arrivalRate: 6,
         rng: rng(seed),
+        staffingDirty: false,
     };
 }
 

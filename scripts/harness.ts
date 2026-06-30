@@ -1,7 +1,7 @@
 // Headless simulation harness for easier testing
 // run with npx tsx scripts/harness.ts
 
-import { Simulation, isPassive } from "../src/sim/simulation";
+import {Simulation, isPassive, FLEX_GRAPH, HYSTERESIS_TICKS} from "../src/sim/simulation";
 import {WorldState} from "../src/sim/types";
 import {createOrder, spawnCustomer} from "../src/sim/world";
 import {fifo, oca, spt} from "../src/sim/dispatch";
@@ -14,7 +14,7 @@ const dagTestSeconds = 300; // short run to test the DAG, allowing the order to 
 const snapshotEvery = 60; // record a snapshot every 60 sim-seconds
 const checkInvariance = true;
 const logCompletions = true;
-
+const seeds = [1] // ,2,3,4,5,6,7,8,9,10,11,12
 // run loop
 
 interface UnloadProbe {
@@ -87,10 +87,10 @@ function logNewCompletions(w: WorldState, alreadyLogged: Set<number>): void {
     for (const t of w.tasks) {
         if (t.status === 'done' && !alreadyLogged.has(t.id)) {
             alreadyLogged.add(t.id);
-            const order = w.orders.find((o) => o.id === t.orderId);
-            console.log(
-                `t=${w.now.toFixed(1)}s done: task ${t.id} [${t.template.stationType}]
-    order=${t.orderId} remaining=${order?.tasksRemaining}`)
+    //         const order = w.orders.find((o) => o.id === t.orderId);
+    //         console.log(
+    //             `t=${w.now.toFixed(1)}s done: task ${t.id} [${t.template.stationType}]
+    // order=${t.orderId} remaining=${order?.tasksRemaining}`)
         }
     }
 }
@@ -144,6 +144,39 @@ function checkInvariants(w: WorldState): string | null {
         const open = w.tasks.filter((t) => t.orderId === o.id && t.status !== "done").length;
         if (o.tasksRemaining !== open) {
             return `order ${o.id} has ${o.tasksRemaining} tasks but ${open} tasks are open.`;
+        }
+    }
+
+    // 5. A flexed worker must be posted at a station accessible from their home via FLEX_GRAPH
+    for (const wk of w.workers) {
+        if (wk.currentStation == null) continue;
+        const home = w.stations.find(s => s.id === wk.homeStation);
+        const target = w.stations.find(s => s.id === wk.currentStation);
+        if (!home || !target) return `worker ${wk.id} flexed to/from a nonexistent station`;
+        const allowed = FLEX_GRAPH[home.type] ?? [];
+        if (!allowed.includes(target.type)) {
+            return `worker ${wk.id} flexed from ${home.type} to ${target.type}, not a valid transfer`;
+        }
+    }
+
+    // 6. If an idle, eligible donor exists, an unmanned-with-demand station
+//    shouldn't sit unstaffed more than a tick or two past hysteresis.
+    for (const s of w.stations) {
+        if ((s.unmannedTicks ?? 0) <= HYSTERESIS_TICKS + 2) continue;
+        const hasDemand = w.tasks.some(t =>
+            t.status === 'pending' && t.template.stationType === s.type &&
+            t.dependsOn.every(id => w.tasks.find(x => x.id === id)?.status === 'done')
+        );
+        if (!hasDemand) continue;
+
+        const neighbourTypes = FLEX_GRAPH[s.type] ?? [];
+        const eligibleDonorIdle = w.workers.some(wk =>
+            wk.assignedTaskId == null &&
+            w.stations.some(ns => ns.type !== s.type && neighbourTypes.includes(ns.type) && ns.id === (wk.currentStation ?? wk.homeStation))
+        );
+
+        if (eligibleDonorIdle) {
+            return `station ${s.type} unmanned for ${s.unmannedTicks} ticks with an idle eligible donor available — flex not firing`;
         }
     }
 
@@ -242,13 +275,17 @@ function main(): void {
     printSnapshots("dag test", snapshots);
 
     const rows: Record<string, Summary> = {};
-    for (const [name, policy] of [["fifo", fifo], ["spt", spt], ["oca", oca]] as const) {
-        const sim = new Simulation({ seed: 42, policy });
-        const { unloadProbe } = runHeadless(sim, simulatedSeconds);
-        rows[name] = summarise(sim.state);
-        summariseUnloads(name, unloadProbe)
+    for (const s of seeds) {
+        console.log(`Seed ${s}`)
+        for (const [name, policy] of [["fifo", fifo], ["spt", spt], ["oca", oca]] as const) {
+            const sim = new Simulation({ seed: s, policy, unstaffedStationTypes: ['grill'] });
+            const { unloadProbe } = runHeadless(sim, simulatedSeconds);
+            rows[name] = summarise(sim.state);
+            summariseUnloads(name, unloadProbe)
+        }
+        console.table(rows);
     }
-    console.table(rows);
+
 }
 
 main();

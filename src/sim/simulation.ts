@@ -2,10 +2,19 @@ import {createOrder, createWorld, spawnCustomer} from './world';
 import type {Candidate, Policy, Station, StationType, TaskInstance, WorldState, Worker} from "./types.ts";
 import {fifo} from "./dispatch.ts";
 
-export const passiveStations = new Set<StationType>(['grill', 'fryer']);
-export const isPassive = (t: StationType | undefined) => passiveStations.has(t);
+export const PASSIVE_STATIONS = new Set<StationType>(['grill', 'fryer']);
+export const isPassive = (t: StationType) => PASSIVE_STATIONS.has(t);
 export const LOAD_S = 10;
 export const UNLOAD_S = 10;
+export const HYSTERESIS_TICKS = 40;
+export const FLEX_GRAPH: Partial<Record<StationType, StationType[]>> = {
+    drinks: ['bagging'],
+    bagging: ['drinks'],
+    fryer: ['grill'],
+    grill: ['fryer'],
+}
+
+const postedAt = (w: Worker): number | undefined => w.currentStation ?? w.homeStation;
 
 export class Simulation {
     state: WorldState;
@@ -13,9 +22,9 @@ export class Simulation {
     private nextArrivalIn: number = 0;
     private policy: Policy;
 
-    constructor(opts: { seed?: number, policy?: Policy } = {}) {
-        const { seed, policy = fifo } = opts;
-        this.state = createWorld({ seed });
+    constructor(opts: { seed?: number, policy?: Policy, unstaffedStationTypes?: StationType[] } = {}) {
+        const { seed, policy = fifo, unstaffedStationTypes } = opts;
+        this.state = createWorld({ seed, unstaffedStationTypes });
         this.policy = policy;
     }
 
@@ -53,7 +62,7 @@ export class Simulation {
 
     private freeWorkerAt(station: Station): Worker | undefined {
         return this.state.workers.find(
-            w => w.homeStation === station.id && w.assignedTaskId == null
+            w => postedAt(w) === station.id && w.assignedTaskId == null
         );
     }
 
@@ -69,7 +78,7 @@ export class Simulation {
             if (this.state.now < t.finishAt) continue; // timer not yet over
 
             const station = this.state.stations.find(s => s.id === t.stationId);
-
+            if (!station) continue;
             if (!isPassive(station?.type)) {
                 this.complete(t);
                 continue;
@@ -78,6 +87,7 @@ export class Simulation {
             if (t.phase === 'loading') {
                 const w = this.state.workers.find(w => w.assignedTaskId === t.id);
                 if (w) w.assignedTaskId = undefined;
+                this.state.staffingDirty = true;
                 t.phase = 'processing';
                 t.finishAt = this.state.now + t.template.durationS;
             } else if (t.phase === 'processing') {
@@ -91,7 +101,10 @@ export class Simulation {
     private complete(t: TaskInstance) {
         t.status = 'done';
         const worker = this.state.workers.find(w => w.assignedTaskId == t.id);
-        if (worker) worker.assignedTaskId = undefined;
+        if (worker) {
+            worker.assignedTaskId = undefined;
+            this.state.staffingDirty = true;
+        }
         const station = this.state.stations.find((station) => station.id === t.stationId);
         if (station) {
             const i = station.inProgress.findIndex(task => task.id === t.id);
@@ -122,29 +135,70 @@ export class Simulation {
     }
 
     private staff() {
-        return
+        const readyByType = this.readyByStationType();
+
+        for (const station of this.state.stations) {
+            const manned = this.state.workers.some(w => postedAt(w) === station.id);
+            const hasDemand = (readyByType.get(station.type)?.length ?? 0) > 0;
+
+            if (!manned && hasDemand) {
+                station.unmannedTicks = (station.unmannedTicks ?? 0) + 1;
+                if (station.unmannedTicks >= HYSTERESIS_TICKS) {
+                    this.state.staffingDirty = true;
+                }
+            } else {
+                station.unmannedTicks = 0;
+            }
+        }
+
+        if (!this.state.staffingDirty) return;
+
+        const justFlexed = new Set<number>();
+        // flex pass
+        for (const station of this.state.stations) {
+            if ((station.unmannedTicks ?? 0) < HYSTERESIS_TICKS) continue;
+            const hasDemand = (readyByType.get(station.type)?.length ?? 0) > 0;
+            if (!hasDemand) continue;
+
+            const neighbourTypes = FLEX_GRAPH[station.type] ?? [];
+            const neighbourStations = this.state.stations.filter(s => neighbourTypes.includes(s.type));
+            const availableWorker = this.state.workers.find(w => w.assignedTaskId == null && neighbourStations.some(s => s.id === postedAt(w)));
+            if (availableWorker) {
+                availableWorker.currentStation = station.id === availableWorker.homeStation
+                    ? undefined
+                    : station.id;
+                justFlexed.add(availableWorker.id);
+                station.unmannedTicks = 0;
+            }
+        }
+
+        // flex-back pass
+        for (const worker of this.state.workers) {
+            if (worker.currentStation === undefined) continue;
+            if (worker.assignedTaskId != null) continue;
+            if (justFlexed.has(worker.id)) continue;
+
+            const flexedStation = this.state.stations.find(s => s.id === worker.currentStation);
+            if (flexedStation && flexedStation.inProgress.length > 0) continue;
+
+            const homeStation = this.state.stations.find(s => s.id === worker.homeStation);
+            if (!homeStation) continue;
+            const homeManned = this.state.workers.some(w => w.id !== worker.id && postedAt(w) === homeStation.id);
+            const hasDemand = (readyByType.get(homeStation.type)?.length ?? 0) > 0;
+            if (homeManned || !hasDemand) continue;
+
+            worker.currentStation = undefined;
+        }
+
+        this.state.staffingDirty = false;
     }
 
     private dispatch() {
-        const readyByType = new Map<StationType, Candidate[]>();
-
-        for (const t of this.state.tasks) {
-            if (t.status !== "pending") continue;
-            const ready = t.dependsOn.every(
-                depId => this.state.tasks.find(x => x.id === depId)?.status === "done"
-            );
-            if (!ready) continue;
-
-            const type = t.template.stationType;
-            let bucket = readyByType.get(type);
-            if (!bucket) readyByType.set(type, (bucket = []));
-            bucket.push(this.toCandidate(t));
-        }
-
+        const readyByType = this.readyByStationType();
         for (const [type, candidates] of readyByType) {
             const stations = this.state.stations.filter(s => s.type === type);
             const freeSlots = stations.reduce((n, s) => n + (s.slots - s.inProgress.length), 0);
-            const freeWorkers = this.state.workers.filter(w => w.assignedTaskId == null && stations.some(s => s.id === w.homeStation)).length;
+            const freeWorkers = this.state.workers.filter(w => w.assignedTaskId == null && stations.some(s => s.id === postedAt(w))).length;
             const capacity = Math.min(freeSlots, freeWorkers);
             if (capacity <= 0) continue;
 
@@ -157,6 +211,23 @@ export class Simulation {
                 this.assign(task, station, worker);
             }
         }
+    }
+
+    private readyByStationType(): Map<StationType, Candidate[]> {
+        const readyByType = new Map<StationType, Candidate[]>();
+        for (const t of this.state.tasks) {
+            if (t.status !== "pending") continue;
+            const ready = t.dependsOn.every(
+                depId => this.state.tasks.find(x => x.id === depId)?.status === "done"
+            );
+            if (!ready) continue;
+
+            const type = t.template.stationType;
+            let bucket = readyByType.get(type);
+            if (!bucket) readyByType.set(type, (bucket = []));
+            bucket.push(this.toCandidate(t));
+        }
+        return readyByType;
     }
 
     private assign(t: TaskInstance, station: Station, worker: Worker) {

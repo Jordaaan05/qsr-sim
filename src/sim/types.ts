@@ -9,6 +9,7 @@ export interface WorldState {
     tasks: TaskInstance[];
     arrivalRate: number;
     rng: () => number;
+    staffingDirty: boolean;
 }
 
 export interface MenuItem {
@@ -33,11 +34,13 @@ export interface Station {
     x: number; y: number;
     slots: number;              // how many tasks can occur at once
     inProgress: TaskInstance[]; // tasks in progress
+    unmannedTicks?: number;
 }
 
 export interface Worker {
     id: number;
     homeStation?: number; // if assigned a station or rotating
+    currentStation?: number;
     x: number; y: number;
     carrying?: TaskInstance; // moving an item between stations
     assignedTaskId?: number; // free when undefined
